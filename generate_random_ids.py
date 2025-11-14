@@ -12,7 +12,7 @@ import torchvision.transforms as transforms
 
 
 _PWD = Path(__file__).absolute().parent
-sys.path.append(os.path.join(Path(__file__).absolute(), 'src'))
+sys.path.append(str(_PWD / 'src'))
 from evaluation.inference_class import Inference
 
 
@@ -27,9 +27,10 @@ def save_image(image_dict):
 
 @torch.no_grad()
 def make_pid(inference_model, number_images_per_ids):
-    id_latent = torch.randn(1, 256, device='cuda').repeat(number_images_per_ids, 1)
+    device = inference_model.device
+    id_latent = torch.randn(1, 256, device=device).repeat(number_images_per_ids, 1)
     id_noise = duplicate_noise(inference_model.model.module.make_noise(1), number_images_per_ids)
-    pose_latent = torch.randn(number_images_per_ids, 256, device='cuda')
+    pose_latent = torch.randn(number_images_per_ids, 256, device=device)
 
     latent = torch.cat([id_latent, pose_latent], dim=1)
     images, _ = inference_model.model([latent], noise=id_noise)

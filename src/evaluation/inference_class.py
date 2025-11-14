@@ -12,11 +12,23 @@ from models.gan_model import Generator
 _log = get_logger(__name__)
 
 
+def get_device():
+    """Get the best available device: MPS > CUDA > CPU"""
+    if torch.cuda.is_available():
+        return 'cuda'
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return 'mps'
+    else:
+        return 'cpu'
+
+
 class Inference():
     def __init__(self, model_dir, ckpt=None):
         _log.info('Init inference class...')
         self.model_dir = model_dir
         self.ckpt = ckpt
+        self.device = get_device()
+        _log.info(f'Using device: {self.device}')
         self.model, self.batch_utils, self.config, self.ckpt_iter = self.retrieve_model(model_dir, ckpt)
         self.noise = None
         self.noise = self.reset_noise()
@@ -27,7 +39,7 @@ class Inference():
         _log.info('Calc mean_w_latents...')
         mean_latent_w_list = []
         for i in range(100):
-            latent_z = torch.randn(1000, self.config.model_config['latent_size'], device='cuda')
+            latent_z = torch.randn(1000, self.config.model_config['latent_size'], device=self.device)
             if isinstance(self.model, torch.nn.DataParallel):
                 latent_w = self.model.module.style(latent_z).cpu()
             else:
@@ -40,9 +52,9 @@ class Inference():
 
     def reset_noise(self):
         if isinstance(self.model, torch.nn.DataParallel):
-            self.noise = self.model.module.make_noise(device='cuda')
+            self.noise = self.model.module.make_noise(device=self.device)
         else:
-            self.noise = self.model.make_noise(device='cuda')
+            self.noise = self.model.make_noise(device=self.device)
 
     @staticmethod
     def expend_noise(noise, batch_size):
@@ -59,9 +71,9 @@ class Inference():
             latent_w[:, place_in_latent[0]: place_in_latent[1]] = \
                 truncation * (latent_w[:, place_in_latent[0]: place_in_latent[1]] - torch.cat(
                     [self.mean_w_latents[key].clone().unsqueeze(0) for _ in range(latent_w.shape[0])], dim=0
-                ).cuda()) + torch.cat(
+                ).to(self.device)) + torch.cat(
                     [self.mean_w_latents[key].clone().unsqueeze(0) for _ in range(latent_w.shape[0])], dim=0
-                ).cuda()
+                ).to(self.device)
         return latent_w
 
     def check_valid_group(self, group):
@@ -92,7 +104,9 @@ class Inference():
                     break
         _log.info('Loading %s ckpt' % ckpt_path)
         config = read_json(config_path, return_obj=True)
-        ckpt = torch.load(os.path.join(checkpoints_path, ckpt_path))
+        device = get_device()
+        # Load checkpoint to CPU first for better compatibility, then move model to target device
+        ckpt = torch.load(os.path.join(checkpoints_path, ckpt_path), map_location='cpu')
 
         batch_utils = None
         if not config.model_config['vanilla']:
@@ -115,7 +129,7 @@ class Inference():
             fc_config=None if config.model_config['vanilla'] else batch_utils.get_fc_config(),
             conv_transpose=config.model_config['conv_transpose'],
             noise_mode=config.model_config['g_noise_mode']
-        ).cuda()
+        ).to(device)
         _log.info('Loading Model: %s, ckpt iter %s' % (model_dir, ckpt_iter))
         model.load_state_dict(ckpt['g_ema'])
         model = torch.nn.DataParallel(model)
