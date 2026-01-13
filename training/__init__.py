@@ -13,6 +13,7 @@ from .models import FingerprintRecognitionModel, ModifiedResNet18, CosFaceLoss, 
 from .dataset import FPGANWrapper, SyntheticFingerprintDataset, OnTheFlyDataLoader
 from .trainer import Trainer, train_single_gpu, train_multi_gpu
 from .evaluate import evaluate, extract_embeddings, compute_verification_metrics
+from .validation import ValidationManager, SyntheticValidationDataset, FVC2004ValidationDataset
 
 __all__ = [
     'Config',
@@ -30,4 +31,7 @@ __all__ = [
     'evaluate',
     'extract_embeddings',
     'compute_verification_metrics',
+    'ValidationManager',
+    'SyntheticValidationDataset',
+    'FVC2004ValidationDataset',
 ]

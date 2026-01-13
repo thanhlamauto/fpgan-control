@@ -23,6 +23,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import GradScaler, autocast
 import numpy as np
 
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
 # Add paths
 _PWD = Path(__file__).absolute().parent
 sys.path.append(str(_PWD))
@@ -31,6 +37,7 @@ sys.path.append(str(_PWD.parent / 'src'))
 from config import Config, get_default_config
 from models import FingerprintRecognitionModel, build_model
 from dataset import OnTheFlyDataLoader, verify_generator
+from validation import ValidationManager
 
 
 def set_seed(seed: int):
@@ -91,11 +98,40 @@ class Trainer:
         config: Config,
         rank: int = 0,
         world_size: int = 1,
+        fvc2004_db1b_path: Optional[str] = None,
+        validate_every: int = 5,
+        wandb_project: Optional[str] = None,
+        wandb_entity: Optional[str] = None,
+        wandb_run_name: Optional[str] = None,
     ):
         self.config = config
         self.rank = rank
         self.world_size = world_size
         self.is_main = (rank == 0)
+        self.validate_every = validate_every
+        self.fvc2004_db1b_path = fvc2004_db1b_path
+        self.use_wandb = WANDB_AVAILABLE and wandb_project is not None and self.is_main
+
+        # Initialize wandb
+        if self.use_wandb:
+            wandb.init(
+                project=wandb_project,
+                entity=wandb_entity,
+                name=wandb_run_name or f"fpgan_train_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                config={
+                    "num_identities": config.data.num_identities,
+                    "images_per_identity": config.data.images_per_identity,
+                    "batch_size": config.training.batch_size,
+                    "epochs": config.training.epochs,
+                    "lr": config.training.lr,
+                    "embedding_size": config.model.embedding_size,
+                    "cosface_scale": config.cosface.scale,
+                    "cosface_margin": config.cosface.margin,
+                    "pseudo_mix": config.data.enable_pseudo_mix,
+                    "mix_ratio": config.data.mix_ratio,
+                    "seed": config.training.seed,
+                }
+            )
 
         # Device
         self.device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
@@ -131,13 +167,35 @@ class Trainer:
         self.data_loader_wrapper = OnTheFlyDataLoader(config, rank, world_size)
         self.train_loader = None  # Created lazily
 
+        # Validation manager (only on main process)
+        self.val_manager = None
+        if self.is_main:
+            self._setup_validation()
+
         # Logging
         self.log_dir = Path(config.training.checkpoint_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         self.training_log = []
         self.best_acc = 0.0
+        self.best_eer_synthetic = 1.0
+        self.best_eer_real = 1.0
         self.start_epoch = 0
+
+    def _setup_validation(self):
+        """Setup validation manager with synthetic and real validation sets."""
+        try:
+            self.val_manager = ValidationManager(
+                config=self.config,
+                device=self.device,
+                synthetic_val_ids=100,
+                synthetic_val_images_per_id=8,
+                fvc2004_db1b_path=self.fvc2004_db1b_path,
+            )
+            self.log("Validation manager initialized")
+        except Exception as e:
+            self.log(f"Warning: Could not initialize validation manager: {e}")
+            self.val_manager = None
 
     def log(self, msg: str):
         """Log message (only on main process)."""
@@ -298,6 +356,21 @@ class Trainer:
                 f"Loss: {metrics['loss']:.4f}, Acc: {metrics['accuracy']:.4f}"
             )
 
+            # Run validation every N epochs
+            val_results = {}
+            if self.is_main and self.val_manager and (epoch % self.validate_every == 0 or epoch == self.config.training.epochs):
+                self.log("\n--- Running Validation ---")
+                model_to_eval = self.model.module if self.world_size > 1 else self.model
+                val_results = self.val_manager.validate(model_to_eval)
+
+                # Track best EER
+                if 'synthetic' in val_results:
+                    if val_results['synthetic']['eer'] < self.best_eer_synthetic:
+                        self.best_eer_synthetic = val_results['synthetic']['eer']
+                if 'fvc2004_db1b' in val_results:
+                    if val_results['fvc2004_db1b']['eer'] < self.best_eer_real:
+                        self.best_eer_real = val_results['fvc2004_db1b']['eer']
+
             # Save training log
             log_entry = {
                 'epoch': epoch,
@@ -305,10 +378,27 @@ class Trainer:
                 'accuracy': metrics['accuracy'],
                 'lr': self.scheduler.get_last_lr()[0],
                 'time': epoch_time,
+                'val_synthetic_eer': val_results.get('synthetic', {}).get('eer'),
+                'val_fvc2004_eer': val_results.get('fvc2004_db1b', {}).get('eer'),
             }
             self.training_log.append(log_entry)
 
-            # Check if best
+            # Log to wandb
+            if self.use_wandb:
+                wandb_log = {
+                    'epoch': epoch,
+                    'train/loss': metrics['loss'],
+                    'train/accuracy': metrics['accuracy'],
+                    'train/lr': self.scheduler.get_last_lr()[0],
+                    'train/epoch_time': epoch_time,
+                }
+                if val_results.get('synthetic', {}).get('eer') is not None:
+                    wandb_log['val/synthetic_eer'] = val_results['synthetic']['eer']
+                if val_results.get('fvc2004_db1b', {}).get('eer') is not None:
+                    wandb_log['val/fvc2004_db1b_eer'] = val_results['fvc2004_db1b']['eer']
+                wandb.log(wandb_log)
+
+            # Check if best (based on training accuracy)
             is_best = metrics['accuracy'] > self.best_acc
             if is_best:
                 self.best_acc = metrics['accuracy']
@@ -320,7 +410,21 @@ class Trainer:
             if self.world_size > 1:
                 dist.barrier()
 
-        self.log(f"Training completed! Best accuracy: {self.best_acc:.4f}")
+        self.log(f"\n{'='*60}")
+        self.log(f"Training completed!")
+        self.log(f"  Best training accuracy: {self.best_acc:.4f}")
+        self.log(f"  Best synthetic val EER: {self.best_eer_synthetic:.4f}")
+        self.log(f"  Best real val EER (DB1_B): {self.best_eer_real:.4f}")
+        self.log(f"{'='*60}")
+
+        # Log final results to wandb
+        if self.use_wandb:
+            wandb.log({
+                'final/best_accuracy': self.best_acc,
+                'final/best_synthetic_eer': self.best_eer_synthetic,
+                'final/best_real_eer': self.best_eer_real,
+            })
+            wandb.finish()
 
         # Save final training log
         if self.is_main:
@@ -328,29 +432,67 @@ class Trainer:
                 json.dump(self.training_log, f, indent=2)
 
 
-def train_single_gpu(config: Config):
+def train_single_gpu(
+    config: Config,
+    fvc2004_db1b_path: Optional[str] = None,
+    validate_every: int = 5,
+    wandb_project: Optional[str] = None,
+    wandb_entity: Optional[str] = None,
+    wandb_run_name: Optional[str] = None,
+):
     """Single GPU training."""
-    trainer = Trainer(config, rank=0, world_size=1)
+    trainer = Trainer(
+        config, rank=0, world_size=1,
+        fvc2004_db1b_path=fvc2004_db1b_path,
+        validate_every=validate_every,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        wandb_run_name=wandb_run_name,
+    )
     trainer.train()
 
 
-def train_worker(rank: int, world_size: int, config: Config):
+def train_worker(
+    rank: int,
+    world_size: int,
+    config: Config,
+    fvc2004_db1b_path: Optional[str] = None,
+    validate_every: int = 5,
+    wandb_project: Optional[str] = None,
+    wandb_entity: Optional[str] = None,
+    wandb_run_name: Optional[str] = None,
+):
     """Worker function for distributed training."""
     setup_distributed(rank, world_size)
 
-    trainer = Trainer(config, rank=rank, world_size=world_size)
+    trainer = Trainer(
+        config, rank=rank, world_size=world_size,
+        fvc2004_db1b_path=fvc2004_db1b_path,
+        validate_every=validate_every,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        wandb_run_name=wandb_run_name,
+    )
     trainer.train()
 
     cleanup_distributed()
 
 
-def train_multi_gpu(config: Config, num_gpus: int = 2):
+def train_multi_gpu(
+    config: Config,
+    num_gpus: int = 2,
+    fvc2004_db1b_path: Optional[str] = None,
+    validate_every: int = 5,
+    wandb_project: Optional[str] = None,
+    wandb_entity: Optional[str] = None,
+    wandb_run_name: Optional[str] = None,
+):
     """Multi-GPU training using spawn."""
     import torch.multiprocessing as mp
 
     mp.spawn(
         train_worker,
-        args=(num_gpus, config),
+        args=(num_gpus, config, fvc2004_db1b_path, validate_every, wandb_project, wandb_entity, wandb_run_name),
         nprocs=num_gpus,
         join=True
     )

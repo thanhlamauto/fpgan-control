@@ -90,18 +90,34 @@ class Inference():
 
         _log.info('Retrieve config from %s' % config_path)
         checkpoints_path = os.path.join(model_dir, 'checkpoint')
-        ckpt_list = list(os.listdir(checkpoints_path))
+        ckpt_list = [f for f in os.listdir(checkpoints_path) if f.endswith('.pt')]
         ckpt_list.sort()
+
         if ckpt is None:
-            ckpt_path = ckpt_list[-1]
+            # Prefer best_fid.pt if exists, otherwise use last checkpoint
+            if 'best_fid.pt' in ckpt_list:
+                ckpt_path = 'best_fid.pt'
+            else:
+                ckpt_path = ckpt_list[-1]
             ckpt_iter = ckpt_path.split('.')[0]
         else:
             ckpt_path = None
             ckpt_iter = None
-            for ckpt_path in ckpt_list:
-                if int(ckpt_path.split('.')[0]) == ckpt and str(ckpt) in ckpt_path:
-                    ckpt_iter = ckpt_path.split('.')[0]
-                    break
+            for cp in ckpt_list:
+                # Handle both numeric and named checkpoints
+                try:
+                    if int(cp.split('.')[0]) == ckpt:
+                        ckpt_path = cp
+                        ckpt_iter = cp.split('.')[0]
+                        break
+                except ValueError:
+                    if str(ckpt) in cp:
+                        ckpt_path = cp
+                        ckpt_iter = cp.split('.')[0]
+                        break
+            if ckpt_path is None:
+                ckpt_path = ckpt_list[-1]
+                ckpt_iter = ckpt_path.split('.')[0]
         _log.info('Loading %s ckpt' % ckpt_path)
         config = read_json(config_path, return_obj=True)
         device = get_device()

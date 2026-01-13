@@ -65,7 +65,7 @@ class CosFaceConfig:
 @dataclass
 class TrainingConfig:
     """Training configuration."""
-    batch_size: int = 128  # Per GPU
+    batch_size: int = 64  # Per GPU (reduced for on-the-fly generation)
     num_workers: int = 4
     epochs: int = 30
     lr: float = 0.1

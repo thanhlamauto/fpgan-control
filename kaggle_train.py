@@ -15,7 +15,7 @@ Usage on Kaggle:
 2. Download FPGAN model weights
 3. Run this script
 
-Environment: Kaggle with 2x T4 GPUs
+Environment: Kaggle with GPU P100 (16GB VRAM)
 """
 
 import os
@@ -29,8 +29,11 @@ from pathlib import Path
 
 # Paths (adjust for Kaggle)
 REPO_ROOT = Path("/kaggle/working/fpgan-control")
-MODEL_URL = "https://1drv.ms/u/s!ArMf0NJWksTfiyJN7O70ezn7YAkJ?e=pl2WIA"
-MODEL_DIR = REPO_ROOT / "models" / "id06fre20_fingers384_id_noise_same_id_idl005_posel000_large_pose_20230606-082209"
+MODEL_DIR = Path("/kaggle/input/fpgan-weight/pytorch/default/1/id06fre20_fingers384_id_noise_same_id_idl005_posel000_large_pose_20230606-082209")
+
+# Wandb settings
+WANDB_PROJECT = "fpgan-fingerprint-recognition"
+WANDB_ENTITY = None  # Set your wandb username/team here, or None for default
 
 # FVC2004 Dataset paths on Kaggle
 FVC2004_DB1_A = "/kaggle/input/fvc-2004/FVC2004/Dbs/DB1_A"  # Test set (100 subjects x 8 impressions)
@@ -40,7 +43,7 @@ FVC2004_DB1_B = "/kaggle/input/fvc-2004/FVC2004/Dbs/DB1_B"  # Validation set (10
 NUM_IDENTITIES = 50000      # Number of synthetic identities
 IMAGES_PER_ID = 11          # Images per identity
 EPOCHS = 30                 # Training epochs
-BATCH_SIZE = 128            # Batch size per GPU (2x T4 = 256 effective)
+BATCH_SIZE = 64             # Batch size (P100 16GB - conservative for on-the-fly generation)
 LEARNING_RATE = 0.1
 SEED = 42
 
@@ -68,10 +71,11 @@ def setup_environment():
         import torchvision
         import sklearn
         import tqdm
+        import wandb
     except ImportError:
         print("Installing dependencies...")
         subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                       "torchvision", "scikit-learn", "tqdm"])
+                       "torchvision", "scikit-learn", "tqdm", "wandb"])
 
     # Check GPU
     import torch
@@ -91,44 +95,19 @@ def setup_environment():
 
 
 def download_model():
-    """Download FPGAN model weights."""
+    """Check FPGAN model weights."""
     print("\n" + "=" * 60)
-    print("DOWNLOADING MODEL WEIGHTS")
+    print("CHECKING MODEL WEIGHTS")
     print("=" * 60)
 
     if MODEL_DIR.exists() and (MODEL_DIR / "checkpoint").exists():
-        print(f"Model already exists at {MODEL_DIR}")
+        print(f"Model found at {MODEL_DIR}")
+        # List checkpoints
+        ckpts = list((MODEL_DIR / "checkpoint").glob("*.pt"))
+        print(f"  Checkpoints: {[c.name for c in ckpts]}")
         return True
 
-    print(f"Please download the model manually from:\n{MODEL_URL}")
-    print(f"And extract to: {MODEL_DIR}")
-    print("\nAlternatively, upload the model as a Kaggle dataset.")
-
-    # Check if model is available as Kaggle input
-    kaggle_model_paths = [
-        "/kaggle/input/fpgan-control-model",
-        "/kaggle/input/fpgan-model",
-        "/kaggle/input/fpgan-control-model/id06fre20_fingers384_id_noise_same_id_idl005_posel000_large_pose_20230606-082209",
-    ]
-
-    for path in kaggle_model_paths:
-        if os.path.exists(path):
-            print(f"Found model at {path}")
-            # Create symlink
-            MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
-            if not MODEL_DIR.exists():
-                # Check if path is the full model dir or parent
-                if os.path.exists(os.path.join(path, "checkpoint")):
-                    os.symlink(path, str(MODEL_DIR))
-                else:
-                    # Search for model dir inside
-                    for item in os.listdir(path):
-                        item_path = os.path.join(path, item)
-                        if os.path.isdir(item_path) and os.path.exists(os.path.join(item_path, "checkpoint")):
-                            os.symlink(item_path, str(MODEL_DIR))
-                            break
-            return True
-
+    print(f"ERROR: Model not found at {MODEL_DIR}")
     return False
 
 
@@ -241,7 +220,7 @@ def run_training(num_gpus: int):
     config.training.lr = LEARNING_RATE
     config.training.seed = SEED
     config.training.checkpoint_dir = CHECKPOINT_DIR
-    config.training.use_amp = True  # Mixed precision
+    config.training.use_amp = False  # P100 không có Tensor Cores, AMP ít hiệu quả
 
     # Print config summary
     print("\nTraining Configuration:")
@@ -263,13 +242,25 @@ def run_training(num_gpus: int):
     # Save config
     config.save(os.path.join(CHECKPOINT_DIR, "config.json"))
 
-    # Start training
+    # Start training with validation and wandb logging
     if num_gpus > 1:
         print(f"\nStarting multi-GPU training on {num_gpus} GPUs...")
-        train_multi_gpu(config, num_gpus)
+        train_multi_gpu(
+            config, num_gpus,
+            fvc2004_db1b_path=FVC2004_DB1_B,
+            validate_every=5,
+            wandb_project=WANDB_PROJECT,
+            wandb_entity=WANDB_ENTITY,
+        )
     else:
         print("\nStarting single GPU training...")
-        train_single_gpu(config)
+        train_single_gpu(
+            config,
+            fvc2004_db1b_path=FVC2004_DB1_B,
+            validate_every=5,
+            wandb_project=WANDB_PROJECT,
+            wandb_entity=WANDB_ENTITY,
+        )
 
     print("\nTraining completed!")
     return True
