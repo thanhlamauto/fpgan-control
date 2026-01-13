@@ -30,7 +30,7 @@ _PWD = Path(__file__).absolute().parent
 sys.path.append(str(_PWD))
 
 from config import Config, get_default_config
-from models import FingerprintRecognitionModel, build_model
+from recognition_models import FingerprintRecognitionModel, build_model
 
 
 class FVC2004Dataset(Dataset):

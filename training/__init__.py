@@ -9,7 +9,7 @@ generated on-the-fly by FPGAN-Control.
 """
 
 from .config import Config, get_default_config
-from .models import FingerprintRecognitionModel, ModifiedResNet18, CosFaceLoss, build_model
+from .recognition_models import FingerprintRecognitionModel, ModifiedResNet18, CosFaceLoss, build_model
 from .dataset import FPGANWrapper, SyntheticFingerprintDataset, OnTheFlyDataLoader
 from .trainer import Trainer, train_single_gpu, train_multi_gpu
 from .evaluate import evaluate, extract_embeddings, compute_verification_metrics
