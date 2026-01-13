@@ -239,6 +239,10 @@ class SyntheticFingerprintDataset(Dataset):
         if self.transform is not None:
             image = self.transform(image)
 
+        # Convert grayscale to RGB if needed (FPGAN generates grayscale fingerprints)
+        if image.shape[0] == 1:
+            image = image.repeat(3, 1, 1)
+
         # Normalize for model input
         image = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(image)
 

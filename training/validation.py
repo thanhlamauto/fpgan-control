@@ -102,6 +102,10 @@ class SyntheticValidationDataset(Dataset):
                     image = generator.generate(id_latent, app_latent)
                     image = image.squeeze(0).cpu()
 
+                    # Convert grayscale to RGB if needed
+                    if image.shape[0] == 1:
+                        image = image.repeat(3, 1, 1)
+
                     # Apply transform
                     image = transform(image)
 
