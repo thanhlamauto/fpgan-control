@@ -34,8 +34,15 @@ _PWD = Path(__file__).absolute().parent
 sys.path.append(str(_PWD))
 sys.path.append(str(_PWD.parent / 'src'))
 
+# Use absolute imports to avoid conflict with src/models
+import sys
+from pathlib import Path
+_TRAINING_DIR = Path(__file__).absolute().parent
+if str(_TRAINING_DIR) not in sys.path:
+    sys.path.insert(0, str(_TRAINING_DIR))
+
 from config import Config, get_default_config
-from models import FingerprintRecognitionModel, build_model
+from training_models import FingerprintRecognitionModel, build_model
 from dataset import OnTheFlyDataLoader, verify_generator
 from validation import ValidationManager
 
