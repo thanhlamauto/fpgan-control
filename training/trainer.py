@@ -42,7 +42,7 @@ if str(_TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(_TRAINING_DIR))
 
 from config import Config, get_default_config
-from training_models import FingerprintRecognitionModel, build_model
+from models import FingerprintRecognitionModel, build_model
 from dataset import OnTheFlyDataLoader, verify_generator
 from validation import ValidationManager
 
