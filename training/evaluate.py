@@ -59,11 +59,24 @@ class FVC2004Dataset(Dataset):
         self._scan_directory()
 
     def _default_transform(self) -> nn.Module:
+        """
+        Transform FVC2004 images to match FPGAN synthetic data format.
+
+        FVC2004: 640x480, Grayscale, bright background, dark ridges
+        FPGAN:   384x384, RGB, bright background, dark ridges
+
+        Steps:
+        1. Center crop to square (480x480 from 640x480)
+        2. Resize to 299x299 (model input size)
+        3. Convert grayscale to RGB
+        4. Normalize to [-1, 1] range (same as FPGAN training)
+        """
         return T.Compose([
-            T.Resize((299, 299)),
+            T.CenterCrop(480),  # Crop to square (takes center 480x480 from 640x480)
+            T.Resize((299, 299), antialias=True),
             T.ToTensor(),
             T.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),  # Grayscale to RGB
-            T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  # Normalize to [-1, 1]
         ])
 
     def _scan_directory(self):
